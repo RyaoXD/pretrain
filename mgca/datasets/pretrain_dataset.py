@@ -37,8 +37,10 @@ class MultimodalPretrainingDataset(data.Dataset):
             self.df = self.df.sample(frac=data_pct, random_state=42)
         self.df.reset_index(drop=True, inplace=True)
         
+        # self.tokenizer = BertTokenizer.from_pretrained(
+        #     "emilyalsentzer/Bio_ClinicalBERT")
         self.tokenizer = BertTokenizer.from_pretrained(
-            "emilyalsentzer/Bio_ClinicalBERT")
+            "../../model/Bio_ClinicalBERT")
         self.max_words = max_words
 
     def load_text_data(self, split):

@@ -151,7 +151,8 @@ class BertEncoder(nn.Module):
                  hidden_dim: int = 2048,
                  freeze_bert: bool = True):
         super(BertEncoder, self).__init__()
-        self.bert_type = "emilyalsentzer/Bio_ClinicalBERT"
+        # self.bert_type = "emilyalsentzer/Bio_ClinicalBERT"
+        self.bert_type = '../../../models/Bio_ClinicalBERT'
         self.last_n_layers = 1
         self.aggregate_method = "sum"
         self.embedding_dim = emb_dim
