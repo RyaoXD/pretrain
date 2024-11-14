@@ -1,0 +1,5 @@
+# 忽略.git目录
+/.git/
+
+# 忽略Bio_ClinicalBERT模型
+/model/Bio_ClinicalBERT/
