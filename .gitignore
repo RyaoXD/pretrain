@@ -2,4 +2,10 @@
 /.git/
 
 # 忽略Bio_ClinicalBERT模型
-/model/Bio_ClinicalBERT/
+/model_files/Bio_ClinicalBERT/
+
+# 忽略查看文件
+/check*.py
+
+# 忽略记录文件
+/data/

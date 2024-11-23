@@ -1,35 +1,22 @@
-import datetime
-import os
 from argparse import ArgumentParser
-
+from einops import rearrange
 import numpy as np
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from cosine_annealing_warmup import CosineAnnealingWarmupRestarts
-from dateutil import tz
-from einops import rearrange
-from pytorch_lightning import LightningModule, Trainer, seed_everything
-from pytorch_lightning.callbacks import (EarlyStopping, LearningRateMonitor,
-                                         ModelCheckpoint)
-from pytorch_lightning.loggers import WandbLogger
-from pytorch_lightning.plugins import DDP2Plugin, DDPPlugin
-from mgca.datasets.data_module import DataModule
-from mgca.datasets.pretrain_dataset import (MultimodalPretrainingDataset,
-                                            multimodal_collate_fn)
-from mgca.datasets.transforms import DataTransforms
-from mgca.models.backbones.encoder import BertEncoder, ImageEncoder
 from torch import distributed as dist
 
-torch.autograd.set_detect_anomaly(True)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = True
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+from pytorch_lightning import LightningModule, Trainer
+from pytorch_lightning.plugins import DDP2Plugin, DDPPlugin
+from cosine_annealing_warmup import CosineAnnealingWarmupRestarts
 
+from models.backbones.encoder import BertEncoder, ImageEncoder
+from models.basic_net import AttentionPool2d
 
-class MGCA(LightningModule):
-    '''Pytorch lightning implementation of MGCA'''
+from pdb import set_trace as st
 
+class main_net(LightningModule):
     def __init__(self,
                  img_encoder: str = "vit_base",
                  freeze_bert: bool = False,
@@ -59,12 +46,17 @@ class MGCA(LightningModule):
                  ):
         super().__init__()
         self.save_hyperparameters()
-
+        
         # init encoders
         self.img_encoder_q = ImageEncoder(
             model_name=img_encoder, output_dim=self.hparams.emb_dim)
         self.text_encoder_q = BertEncoder(
             output_dim=self.hparams.emb_dim, freeze_bert=freeze_bert)
+        self.language_max_length = 112
+        if self.hparams.sentence_split:
+            self.sents_attn_pool = AttentionPool2d(self.language_max_length, self.text_encoder_q.output_dim, 64)
+        else:
+            self.sents_attn_pool = None
 
         # patch local attention layer
         self.patch_local_atten_layer = nn.MultiheadAttention(
@@ -73,15 +65,54 @@ class MGCA(LightningModule):
         self.word_local_atten_layer = nn.MultiheadAttention(
             self.hparams.emb_dim, self.hparams.num_heads, batch_first=True)
 
-        self.prototype_layer = nn.Linear(emb_dim, num_prototypes, bias=False)
+        if self.hparams.symptom_pool is None:
+            self.symptom_prototype_layer = None
+        else:
+            self.symptom_prototype_layer = nn.Linear(emb_dim, num_prototypes, bias=False)
+        
+        if self.hparams.class_pool == "mapping":
+            assert not self.symptom_prototype_layer is None, "No symptom_prototype_layer"
+            self.class_prototype_layer = nn.Linear(num_prototypes, num_prototypes, bias=False)
+        else:
+            self.class_prototype_layer = nn.Linear(emb_dim, num_prototypes, bias=False)
+        
         if self._use_ddp_or_dpp2(self.trainer):
             self.get_assignments = self.distributed_sinkhorn
         else:
             self.get_assignments = self.sinkhorn
-
+        
+    def split_sentence_merge(self, sents_feat_q, sents, sents_ids):
+        st()
+        n_sents,n_dim = sents_feat_q.shape
+        # t = torch.zeros_like(sents_feat_q[0]).to(sents_feat_q.dtype)
+        batch_sents_feature = torch.tensor([])
+        now_index = -1
+        pos = 1
+        report_feat_q = None
+        report_sents = []
+        report_sent = []
+        for sent_feat_q, sent, sent_ids in zip(sents_feat_q, sents, sents_ids):
+            sent_id = sent_ids[0,0]
+            if now_index != sent_id:
+                now_index = sent_id
+                if not report_feat_q is None:
+                    batch_sents_feature=torch.cat((batch_sents_feature,report_feat_q.unsqueeze(0)),dim=0)
+                report_feat_q = torch.zeros((self.language_max_length,n_dim)).to(sents_feat_q.dtype)
+                report_sents.append(report_sent)
+                report_sent = []
+                pos = 1
+            report_feat_q[pos] = sent_feat_q
+            report_sent += sent
+            pos += 1
+            
+            
+        
+        batch_text_feature, pool_attn = self.sents_attn_pool(batch_sens_feature)
+        return 0
+    
     def forward(self, batch, batch_idx, split="train"):
         '''Forward step of our method'''
-
+        
         # Forward of query image encoder
         img_feat_q, patch_feat_q = self.img_encoder_q(
             batch["imgs"])
@@ -93,11 +124,14 @@ class MGCA(LightningModule):
         # Forward of query text encoder
         report_feat_q, word_feat_q, word_attn_q, sents = self.text_encoder_q(
             batch["caption_ids"], batch["attention_mask"], batch["token_type_ids"])
+        if self.hparams.sentence_split:
+            report_feat_q, word_feat_q, word_attn_q, sents = self.split_sentence_merge(report_feat_q,sents,batch["token_type_ids"])
         word_emb_q = self.text_encoder_q.local_embed(word_feat_q)
         word_emb_q = F.normalize(word_emb_q, dim=-1)
         report_emb_q = self.text_encoder_q.global_embed(report_feat_q)
         report_emb_q = F.normalize(report_emb_q, dim=-1)
 
+        ########### Instance-level alignment ################
         bz = img_emb_q.size(0)
         labels = torch.arange(bz).type_as(report_emb_q).long()
 
@@ -106,7 +140,7 @@ class MGCA(LightningModule):
         scores1 = scores.transpose(0, 1)
         loss0 = F.cross_entropy(scores, labels)
         loss1 = F.cross_entropy(scores1, labels)
-        loss_ita = loss0 + loss1
+        loss_global = loss0 + loss1
 
         # compute retrieval accuracy
         i2t_acc1, i2t_acc5 = self.precision_at_k(
@@ -226,15 +260,16 @@ class MGCA(LightningModule):
 
             loss_local = loss_word
 
+        ########### Prototype-level alignment ################
         # normalize prototype layer
         with torch.no_grad():
-            w = self.prototype_layer.weight.data.clone()
+            w = self.class_prototype_layer.weight.data.clone()
             w = F.normalize(w, dim=1, p=2)
-            self.prototype_layer.weight.copy_(w)
+            self.class_prototype_layer.weight.copy_(w)
 
         # Compute assign code of images
-        img_proto_out = self.prototype_layer(img_emb_q)
-        report_proto_out = self.prototype_layer(report_emb_q)
+        img_proto_out = self.class_prototype_layer(img_emb_q)
+        report_proto_out = self.class_prototype_layer(report_emb_q)
 
         # TODO: define this to hparams
         with torch.no_grad():
@@ -261,8 +296,8 @@ class MGCA(LightningModule):
 
         loss_proto = (loss_i2t_proto + loss_t2i_proto) / 2.
 
-        return loss_ita, loss_local, loss_proto, acc1, acc5
-
+        return loss_global, loss_local, loss_proto, acc1, acc5
+    
     def sinkhorn(self, Q, nmb_iters):
         ''' 
             :param Q: (num_prototypes, batch size)
@@ -318,18 +353,18 @@ class MGCA(LightningModule):
             return (Q / torch.sum(Q, dim=0, keepdim=True)).t().float()
 
     def training_step(self, batch, batch_idx):
-        loss_global, loss_local, loss_proto, acc1, acc5 = self(
+        loss_ita, loss_local, loss_proto, acc1, acc5 = self(
             batch, batch_idx, "train")
-        loss = self.hparams.lambda_1 * loss_global + self.hparams.lambda_2 * \
+        loss = self.hparams.lambda_1 * loss_ita + self.hparams.lambda_2 * \
             loss_local + self.hparams.lambda_3 * loss_proto
 
         log = {
-            "t_loss": loss,
-            "t_loss_global": self.hparams.lambda_1 * loss_global,
-            "t_loss_local": self.hparams.lambda_2 * loss_local,
-            "t_loss_proto": self.hparams.lambda_3 * loss_proto,
-            "t_acc1": acc1,
-            "t_acc5": acc5
+            "train_loss": loss,
+            "train_loss_ita": self.hparams.lambda_1 * loss_ita,
+            "train_loss_local": self.hparams.lambda_2 * loss_local,
+            "train_loss_proto": self.hparams.lambda_3 * loss_proto,
+            "train_acc1": acc1,
+            "train_acc5": acc5
         }
         self.log_dict(log, batch_size=self.hparams.batch_size,
                       sync_dist=True, prog_bar=True)
@@ -339,35 +374,27 @@ class MGCA(LightningModule):
     # freeze prototype layer
     def on_after_backward(self):
         if self.current_epoch < self.hparams.freeze_prototypes_epochs:
-            for param in self.prototype_layer.parameters():
+            for param in self.class_prototype_layer.parameters():
                 param.grad = None
 
     def validation_step(self, batch, batch_idx):
-        loss_global, loss_local, loss_proto, acc1, acc5 = self(
+        loss_ita, loss_local, loss_proto, acc1, acc5 = self(
             batch, batch_idx, "valid")
 
         loss = self.hparams.lambda_1 * loss_ita + self.hparams.lambda_2 * \
             loss_local + self.hparams.lambda_3 * loss_proto
 
         log = {
-            "v_loss": loss,
-            "v_loss_global": self.hparams.lambda_1 * loss_global,
-            "v_loss_local": self.hparams.lambda_2 * loss_local,
-            "v_loss_proto": self.hparams.lambda_3 * loss_proto,
-            "v_acc1": acc1,
-            "v_acc5": acc5
+            "val_loss": loss,
+            "val_loss_ita": self.hparams.lambda_1 * loss_ita,
+            "val_loss_local": self.hparams.lambda_2 * loss_local,
+            "val_loss_proto": self.hparams.lambda_3 * loss_proto,
+            "val_acc1": acc1,
+            "val_acc5": acc5
         }
         self.log_dict(log, batch_size=self.hparams.batch_size,
                       sync_dist=True, prog_bar=True)
         return loss
-
-    # def on_train_epoch_end(self):
-    #     ''' Save img_queue and report_queue for visualization '''
-    #     if self.local_rank == 0:
-    #         img_queue_path = f"{self.trainer.callbacks[-1].dirpath}/img_queue.pth"
-    #         torch.save(self.img_queue, img_queue_path)
-    #         report_queue_path = f"{self.trainer.callbacks[-1].dirpath}/report_queue.pth"
-    #         torch.save(self.report_queue, report_queue_path)
 
     @staticmethod
     def precision_at_k(output: torch.Tensor, target: torch.Tensor, top_k=(1,)):
@@ -413,7 +440,8 @@ class MGCA(LightningModule):
     def add_model_specific_args(parent_parser):
         parser = ArgumentParser(parents=[parent_parser], add_help=False)
         # parser.add_argument("--img_encoder", type=str, default="vit_base")
-        parser.add_argument("--img_encoder", type=str, default="resnet_50")
+        parser.add_argument("--img_encoder", type=str,
+                            default="resnet_50", help="vit_base, resnet_50")
         parser.add_argument("--freeze_bert", action="store_true")
         parser.add_argument("--emb_dim", type=int,
                             default=128, help="128, 256")
@@ -424,7 +452,15 @@ class MGCA(LightningModule):
         parser.add_argument("--weight_decay", type=float, default=0.05)
         # parser.add_argument("--batch_size", type=int, default=72)
         parser.add_argument("--batch_size", type=int, default=20)
-        parser.add_argument("--num_prototypes", type=int, default=500)
+        
+        parser.add_argument("--sentence_split", action="store_false", default=True)
+        parser.add_argument("--class_pool", type=str,
+                            default="mapping", help="random, group, mapping")
+        parser.add_argument("--symptom_pool", type=str or None,
+                            default="group", help="random, group")
+        parser.add_argument("--num_prototypes", type=int or None, default=500)
+        parser.add_argument("--num_center", type=int, default=200)
+        
         parser.add_argument("--num_heads", type=int, default=1)
         parser.add_argument("--experiment_name", type=str, default="")
         parser.add_argument("--lambda_1", type=float, default=1.)
@@ -434,7 +470,7 @@ class MGCA(LightningModule):
         parser.add_argument("--bidirectional", action="store_false")
         parser.add_argument("--data_pct", type=float, default=1.)
         return parser
-
+    
     @staticmethod
     def _use_ddp_or_dpp2(trainer: Trainer) -> bool:
         if trainer:
@@ -454,70 +490,4 @@ class MGCA(LightningModule):
 
         return (dataset_size // effective_batch_size) * trainer.max_epochs
 
-
-@torch.no_grad()
-def concat_all_gather(tensor):
-    '''
-    Performs all_gather operation on the provided tensors
-    '''
-    tensors_gather = [torch.ones_like(tensor) for _ in range(
-        torch.distributed.get_world_size())]
-    torch.distributed.all_gather(tensors_gather, tensor, async_op=False)
-    output = torch.cat(tensors_gather, dim=0)
-    return output
-
-
-def cli_main():
-    parser = ArgumentParser()
-    # trainer args
-    parser = Trainer.add_argparse_args(parser)
-    # model args
-    parser = MGCA.add_model_specific_args(parser)
-    args = parser.parse_args()
-
-    args.deterministic = True
-    args.max_epochs = 50
-
-    # seed
-    seed_everything(args.seed)
-
-    datamodule = DataModule(MultimodalPretrainingDataset, multimodal_collate_fn,
-                            DataTransforms, args.data_pct,
-                            args.batch_size, args.num_workers)
-
-    # Add load from checkpoint
-    model = MGCA(**args.__dict__)
-
-    # get current time
-    now = datetime.datetime.now(tz.tzlocal())
-    extension = now.strftime("%Y_%m_%d_%H_%M_%S")
-    ckpt_dir = os.path.join(
-        BASE_DIR, f"../../../data/ckpts/MGCA/{extension}")
-    os.makedirs(ckpt_dir, exist_ok=True)
-    callbacks = [
-        LearningRateMonitor(logging_interval="step"),
-        ModelCheckpoint(monitor="val_loss", dirpath=ckpt_dir,
-                        save_last=True, mode="min", save_top_k=5),
-        EarlyStopping(monitor="val_loss", min_delta=0.,
-                      patience=5, verbose=False, mode="min")
-    ]
-    logger_dir = os.path.join(
-        BASE_DIR, f"../../../data")
-    os.makedirs(logger_dir, exist_ok=True)
-    wandb_logger = WandbLogger(
-        project="MGCA", save_dir=logger_dir, name=extension)
-    trainer = Trainer.from_argparse_args(
-        args=args,
-        callbacks=callbacks,
-        logger=wandb_logger)
-
-    model.training_steps = model.num_training_steps(trainer, datamodule)
-    print(model.training_steps)
-    trainer.fit(model, datamodule=datamodule)
-
-    best_ckpt_path = os.path.join(ckpt_dir, "best_ckpts.yaml")
-    callbacks[1].to_yaml(filepath=best_ckpt_path)
-
-
-if __name__ == "__main__":
-    cli_main()
+    
