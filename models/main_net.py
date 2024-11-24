@@ -10,6 +10,7 @@ from torch import distributed as dist
 from pytorch_lightning import LightningModule, Trainer
 from pytorch_lightning.plugins import DDP2Plugin, DDPPlugin
 from cosine_annealing_warmup import CosineAnnealingWarmupRestarts
+from sklearn.cluster import KMeans
 
 from models.backbones.encoder import BertEncoder, ImageEncoder
 from models.basic_net import AttentionPool2d
@@ -54,7 +55,7 @@ class main_net(LightningModule):
             output_dim=self.hparams.emb_dim, freeze_bert=freeze_bert)
         self.language_max_length = 112
         if self.hparams.sentence_split:
-            self.sents_attn_pool = AttentionPool2d(self.language_max_length, self.text_encoder_q.output_dim, 64)
+            self.sents_attn_pool = AttentionPool2d(self.language_max_length, self.text_encoder_q.embedding_dim, 64)
         else:
             self.sents_attn_pool = None
 
@@ -65,16 +66,19 @@ class main_net(LightningModule):
         self.word_local_atten_layer = nn.MultiheadAttention(
             self.hparams.emb_dim, self.hparams.num_heads, batch_first=True)
 
-        if self.hparams.symptom_pool is None:
+        if self.hparams.symptom_prototype is None:
             self.symptom_prototype_layer = None
         else:
             self.symptom_prototype_layer = nn.Linear(emb_dim, num_prototypes, bias=False)
         
-        if self.hparams.class_pool == "mapping":
+        if self.hparams.class_prototype == "mapping":
             assert not self.symptom_prototype_layer is None, "No symptom_prototype_layer"
             self.class_prototype_layer = nn.Linear(num_prototypes, num_prototypes, bias=False)
         else:
             self.class_prototype_layer = nn.Linear(emb_dim, num_prototypes, bias=False)
+        
+        self.class_proinit_pool = None
+        self.symptom_proinit_pool = None
         
         if self._use_ddp_or_dpp2(self.trainer):
             self.get_assignments = self.distributed_sinkhorn
@@ -82,33 +86,35 @@ class main_net(LightningModule):
             self.get_assignments = self.sinkhorn
         
     def split_sentence_merge(self, sents_feat_q, sents, sents_ids):
-        st()
         n_sents,n_dim = sents_feat_q.shape
         # t = torch.zeros_like(sents_feat_q[0]).to(sents_feat_q.dtype)
-        batch_sents_feature = torch.tensor([])
         now_index = -1
-        pos = 1
-        report_feat_q = None
+        pos = 0
+        batch_tokens_feat_q = torch.tensor([])
+        tokens_feat_q = None
+        reports_sents = []
         report_sents = []
-        report_sent = []
         for sent_feat_q, sent, sent_ids in zip(sents_feat_q, sents, sents_ids):
-            sent_id = sent_ids[0,0]
+            sent_id = sent_ids[0]
             if now_index != sent_id:
                 now_index = sent_id
-                if not report_feat_q is None:
-                    batch_sents_feature=torch.cat((batch_sents_feature,report_feat_q.unsqueeze(0)),dim=0)
-                report_feat_q = torch.zeros((self.language_max_length,n_dim)).to(sents_feat_q.dtype)
-                report_sents.append(report_sent)
-                report_sent = []
-                pos = 1
-            report_feat_q[pos] = sent_feat_q
-            report_sent += sent
+                if not tokens_feat_q is None:
+                    batch_tokens_feat_q=torch.cat((batch_tokens_feat_q,tokens_feat_q.unsqueeze(0)),dim=0)
+                    report_sents += ["[PAD]" for _ in range(self.language_max_length - len(report_sents))]
+                    reports_sents.append(report_sents)
+                tokens_feat_q = torch.zeros((self.language_max_length,n_dim)).to(sents_feat_q.dtype)
+                report_sents = []
+                pos = 0
+            tokens_feat_q[pos] = sent_feat_q
+            sent = ''.join([t+' ' for t in sent if (t not in ['[CLS]', '[PAD]', '[SEP]'])])
+            report_sents.append(sent)
             pos += 1
-            
-            
+        batch_tokens_feat_q=torch.cat((batch_tokens_feat_q,tokens_feat_q.unsqueeze(0)),dim=0).to(sents_feat_q.device)
+        report_sents += ["[PAD]" for _ in range(self.language_max_length - len(report_sents))]
+        reports_sents.append(report_sents)
         
-        batch_text_feature, pool_attn = self.sents_attn_pool(batch_sens_feature)
-        return 0
+        report_feat_q, pool_attn = self.sents_attn_pool(batch_tokens_feat_q)
+        return report_feat_q, batch_tokens_feat_q, pool_attn, reports_sents
     
     def forward(self, batch, batch_idx, split="train"):
         '''Forward step of our method'''
@@ -130,6 +136,50 @@ class main_net(LightningModule):
         word_emb_q = F.normalize(word_emb_q, dim=-1)
         report_emb_q = self.text_encoder_q.global_embed(report_feat_q)
         report_emb_q = F.normalize(report_emb_q, dim=-1)
+        
+        if self.current_epoch == self.hparams.freeze_prototypes_epochs - 1:
+            if self.hparams.class_prototype == "group":
+                self.class_proinit_pool = report_emb_q if self.class_proinit_pool is None else\
+                    torch.vstack((self.class_proinit_pool,report_emb_q))
+            if self.hparams.symptom_prototype == "group":
+                self.symptom_proinit_pool = rearrange(word_emb_q, "b nt d -> (b nt) d") if self.symptom_proinit_pool is None else\
+                    torch.vstack((self.symptom_proinit_pool,rearrange(word_emb_q, "b nt d -> (b nt) d")))
+        if self.current_epoch == self.hparams.freeze_prototypes_epochs:
+            if not self.class_proinit_pool is None:
+                
+                if len(self.class_proinit_pool) < self.hparams.num_center:
+                    self.class_proinit_pool = torch.vstack(self.class_proinit_pool)
+                else:
+                    device = self.class_proinit_pool.device
+                    self.class_proinit_pool = self.class_proinit_pool.to('cpu')
+                    kmean_model = KMeans(n_clusters=self.hparams.num_center,n_init='auto')
+                    kmean_model.fit(self.class_proinit_pool)
+                    
+                    dic = {i:{"ind":[],"vector":None,"center":None} for i in range(self.hparams.num_center)}
+                    for ind,n_label in enumerate(kmean_model.labels_):
+                        dic[n_label]["ind"].append(ind)
+                        dic[n_label]["vector"] = self.class_proinit_pool[ind].reshape(1,-1) if dic[n_label]["vector"] is None else\
+                            torch.vstack((dic[n_label]["vector"],self.class_proinit_pool[ind].reshape(1,-1)))
+                    for value in dic.values():
+                        value["center"] = torch.mean(value["vector"],axis=0)
+                    self.class_proinit_pool = torch.vstack([value["center"] for value in dic.values()]).to(device)
+            if not self.symptom_proinit_pool is None:
+                if len(self.symptom_proinit_pool) < self.hparams.num_center:
+                    self.symptom_proinit_pool = torch.vstack(self.symptom_proinit_pool)
+                else:
+                    device = self.symptom_proinit_pool.device
+                    self.symptom_proinit_pool = self.symptom_proinit_pool.to('cpu')
+                    kmean_model = KMeans(n_clusters=self.hparams.num_center,n_init='auto')
+                    kmean_model.fit(self.symptom_proinit_pool)
+                    
+                    dic = {i:{"ind":[],"vector":None,"center":None} for i in range(self.hparams.num_center)}
+                    for ind,n_label in enumerate(kmean_model.labels_):
+                        dic[n_label]["ind"].append(ind)
+                        dic[n_label]["vector"] = self.symptom_proinit_pool[ind].reshape(1,-1) if dic[n_label]["vector"] is None else\
+                            torch.vstack((dic[n_label]["vector"],self.symptom_proinit_pool[ind].reshape(1,-1)))
+                    for value in dic.values():
+                        value["center"] = torch.mean(value["vector"],axis=0)
+                    self.symptom_proinit_pool = torch.vstack([value["center"] for value in dic.values()]).to(device)
 
         ########### Instance-level alignment ################
         bz = img_emb_q.size(0)
@@ -152,8 +202,12 @@ class main_net(LightningModule):
 
         ########### Token-level alignment ################
         # cross attention patch to sentences
-        mask = torch.from_numpy(np.array(sents)[:, 1:] == "[PAD]").type_as(
-            batch["imgs"]).bool()
+        if self.hparams.sentence_split:
+            mask = torch.from_numpy(np.array(sents) == "[PAD]").type_as(
+                batch["imgs"]).bool()
+        else:
+            mask = torch.from_numpy(np.array(sents)[:, 1:] == "[PAD]").type_as(
+                batch["imgs"]).bool()
 
         if self.hparams.use_local_atten:
             word_atten_output, _ = self.word_local_atten_layer(
@@ -263,13 +317,29 @@ class main_net(LightningModule):
         ########### Prototype-level alignment ################
         # normalize prototype layer
         with torch.no_grad():
-            w = self.class_prototype_layer.weight.data.clone()
-            w = F.normalize(w, dim=1, p=2)
-            self.class_prototype_layer.weight.copy_(w)
+            if self.hparams.class_prototype != "mapping":
+                w = self.class_prototype_layer.weight.data.clone()
+                if not self.class_proinit_pool is None and self.current_epoch == self.hparams.freeze_prototypes_epochs:
+                    w[:len(self.class_proinit_pool)]=self.class_proinit_pool
+                w = F.normalize(w, dim=1, p=2)
+                self.class_prototype_layer.weight.copy_(w)
+            if not self.symptom_prototype_layer is None:
+                w = self.symptom_prototype_layer.weight.data.clone()
+                if not self.symptom_proinit_pool is None and self.current_epoch == self.hparams.freeze_prototypes_epochs:
+                    w[:len(self.symptom_proinit_pool)]=self.symptom_proinit_pool
+                w = F.normalize(w, dim=1, p=2)
+                self.symptom_prototype_layer.weight.copy_(w)
 
+        ### Compute class prototype loss
         # Compute assign code of images
-        img_proto_out = self.class_prototype_layer(img_emb_q)
-        report_proto_out = self.class_prototype_layer(report_emb_q)
+        if self.hparams.class_prototype == "mapping":
+            img_proto_out = self.symptom_prototype_layer(img_emb_q)
+            img_proto_out = self.class_prototype_layer(img_proto_out)
+            report_proto_out = self.symptom_prototype_layer(report_emb_q)
+            report_proto_out = self.class_prototype_layer(report_proto_out)
+        else:
+            img_proto_out = self.class_prototype_layer(img_emb_q)
+            report_proto_out = self.class_prototype_layer(report_emb_q)
 
         # TODO: define this to hparams
         with torch.no_grad():
@@ -291,12 +361,59 @@ class main_net(LightningModule):
             torch.mean(
                 torch.sum(img_code * torch.log(report_proto_prob), dim=1))
         loss_t2i_proto = - \
-            torch.mean(torch.sum(report_code *
-                       torch.log(img_proto_prob), dim=1))
+            torch.mean(
+                torch.sum(report_code * torch.log(img_proto_prob), dim=1))
 
         loss_proto = (loss_i2t_proto + loss_t2i_proto) / 2.
 
-        return loss_global, loss_local, loss_proto, acc1, acc5
+        ### Compute symptom prototype loss
+        if not self.symptom_prototype_layer is None:
+            # Compute assign code of images
+            patch_proto_out = self.symptom_prototype_layer(patch_emb_q)
+            word_proto_out = self.symptom_prototype_layer(word_emb_q)
+            n_batch, n_patch, _ = patch_proto_out.shape
+            _, n_sents, _ = word_proto_out.shape
+            patch_proto_out = rearrange(patch_proto_out, "b np d -> (b np) d")
+            word_proto_out = rearrange(word_proto_out, "b ns d -> (b ns) d")
+
+            # TODO: define this to hparams
+            with torch.no_grad():
+                patch_code = torch.exp(
+                    patch_proto_out / self.hparams.epsilon).t()
+                patch_code = self.get_assignments(
+                    patch_code, self.hparams.sinkhorn_iterations)         # bz, 500
+                word_code = torch.exp(
+                    word_proto_out / self.hparams.epsilon).t()
+                word_code = self.get_assignments(
+                    word_code, self.hparams.sinkhorn_iterations)       # bz, 500
+
+            patch_proto_prob = F.softmax(
+                patch_proto_out / self.hparams.proto_temperature, dim=1)
+            word_proto_prob = F.softmax(
+                word_proto_out / self.hparams.proto_temperature, dim=1)
+
+            word_code = word_code.reshape((n_batch,n_sents,-1))
+            word_proto_prob = word_proto_prob.reshape((n_batch,n_sents,-1))
+            patch_code = patch_code.reshape((n_batch,n_patch,-1))
+            patch_proto_prob = patch_proto_prob.reshape((n_batch,n_patch,-1))
+            
+            word_atten_weights = word_atten_weights.unsqueeze(-1).repeat(1,1,self.hparams.num_prototypes)
+            patch_atten_weights = patch_atten_weights.unsqueeze(-1).repeat(1,1,self.hparams.num_prototypes)
+            word_code = torch.mean(word_code*word_atten_weights,dim=1).squeeze()
+            word_proto_prob = torch.mean(word_proto_prob*word_atten_weights,dim=1).squeeze()
+            patch_code = torch.mean(patch_code*patch_atten_weights,dim=1).squeeze()
+            patch_proto_prob = torch.mean(patch_proto_prob*patch_atten_weights,dim=1).squeeze()
+            
+            loss_p2w_proto = - \
+                torch.mean(
+                    torch.sum(patch_code * torch.log(word_proto_prob), dim=1))
+            loss_w2p_proto = - \
+                torch.mean(
+                    torch.sum(word_code * torch.log(patch_proto_prob), dim=1))
+
+            loss_proto += (loss_p2w_proto + loss_w2p_proto) / 2.
+        
+        return loss_global, loss_local, loss_proto, acc1, acc5, (word_attn_q.max(),word_attn_q.min())
     
     def sinkhorn(self, Q, nmb_iters):
         ''' 
@@ -353,18 +470,20 @@ class main_net(LightningModule):
             return (Q / torch.sum(Q, dim=0, keepdim=True)).t().float()
 
     def training_step(self, batch, batch_idx):
-        loss_ita, loss_local, loss_proto, acc1, acc5 = self(
+        loss_global, loss_local, loss_proto, acc1, acc5, attnminmax = self(
             batch, batch_idx, "train")
-        loss = self.hparams.lambda_1 * loss_ita + self.hparams.lambda_2 * \
+        loss = self.hparams.lambda_1 * loss_global + self.hparams.lambda_2 * \
             loss_local + self.hparams.lambda_3 * loss_proto
 
         log = {
-            "train_loss": loss,
-            "train_loss_ita": self.hparams.lambda_1 * loss_ita,
-            "train_loss_local": self.hparams.lambda_2 * loss_local,
-            "train_loss_proto": self.hparams.lambda_3 * loss_proto,
-            "train_acc1": acc1,
-            "train_acc5": acc5
+            "t_l": loss,
+            "t_l_global": self.hparams.lambda_1 * loss_global,
+            "t_l_local": self.hparams.lambda_2 * loss_local,
+            "t_l_proto": self.hparams.lambda_3 * loss_proto,
+            "t_acc1": acc1,
+            "t_acc5": acc5,
+            "t_amax": attnminmax[0],
+            "t_amin": attnminmax[1]
         }
         self.log_dict(log, batch_size=self.hparams.batch_size,
                       sync_dist=True, prog_bar=True)
@@ -376,21 +495,26 @@ class main_net(LightningModule):
         if self.current_epoch < self.hparams.freeze_prototypes_epochs:
             for param in self.class_prototype_layer.parameters():
                 param.grad = None
+            if not self.symptom_prototype_layer is None:
+                for param in self.symptom_prototype_layer.parameters():
+                    param.grad = None
 
     def validation_step(self, batch, batch_idx):
-        loss_ita, loss_local, loss_proto, acc1, acc5 = self(
+        loss_global, loss_local, loss_proto, acc1, acc5, attnminmax = self(
             batch, batch_idx, "valid")
 
-        loss = self.hparams.lambda_1 * loss_ita + self.hparams.lambda_2 * \
+        loss = self.hparams.lambda_1 * loss_global + self.hparams.lambda_2 * \
             loss_local + self.hparams.lambda_3 * loss_proto
 
         log = {
-            "val_loss": loss,
-            "val_loss_ita": self.hparams.lambda_1 * loss_ita,
-            "val_loss_local": self.hparams.lambda_2 * loss_local,
-            "val_loss_proto": self.hparams.lambda_3 * loss_proto,
-            "val_acc1": acc1,
-            "val_acc5": acc5
+            "v_l": loss,
+            "v_l_global": self.hparams.lambda_1 * loss_global,
+            "v_l_local": self.hparams.lambda_2 * loss_local,
+            "v_l_proto": self.hparams.lambda_3 * loss_proto,
+            "v_acc1": acc1,
+            "v_acc5": acc5,
+            "v_amax": attnminmax[0],
+            "v_amin": attnminmax[1]
         }
         self.log_dict(log, batch_size=self.hparams.batch_size,
                       sync_dist=True, prog_bar=True)
@@ -450,13 +574,13 @@ class main_net(LightningModule):
         parser.add_argument("--learning_rate", type=float, default=2e-5)
         parser.add_argument("--momentum", type=float, default=0.9)
         parser.add_argument("--weight_decay", type=float, default=0.05)
-        # parser.add_argument("--batch_size", type=int, default=72)
-        parser.add_argument("--batch_size", type=int, default=20)
+        parser.add_argument("--batch_size", type=int, default=72)
+        # parser.add_argument("--batch_size", type=int, default=20)
         
-        parser.add_argument("--sentence_split", action="store_false", default=True)
-        parser.add_argument("--class_pool", type=str,
+        parser.add_argument("--sentence_split", action="store_true", default=False)
+        parser.add_argument("--class_prototype", type=str,
                             default="mapping", help="random, group, mapping")
-        parser.add_argument("--symptom_pool", type=str or None,
+        parser.add_argument("--symptom_prototype", type=str or None,
                             default="group", help="random, group")
         parser.add_argument("--num_prototypes", type=int or None, default=500)
         parser.add_argument("--num_center", type=int, default=200)
@@ -468,7 +592,8 @@ class main_net(LightningModule):
         parser.add_argument("--lambda_3", type=float, default=1.)
         parser.add_argument("--seed", type=int, default=42)
         parser.add_argument("--bidirectional", action="store_false")
-        parser.add_argument("--data_pct", type=float, default=1.)
+        # parser.add_argument("--data_pct", type=float, default=1.)
+        parser.add_argument("--data_pct", type=float, default=1)
         return parser
     
     @staticmethod

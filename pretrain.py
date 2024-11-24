@@ -27,6 +27,7 @@ def main():
 
     args.deterministic = True
     args.max_epochs = 50
+    args.gpus = 1
 
     # seed
     seed_everything(args.seed)
@@ -47,9 +48,9 @@ def main():
     os.makedirs(ckpt_dir, exist_ok=True)
     callbacks = [
         LearningRateMonitor(logging_interval="step"),
-        ModelCheckpoint(monitor="val_loss", dirpath=ckpt_dir,
+        ModelCheckpoint(monitor="v_l", dirpath=ckpt_dir,
                         save_last=True, mode="min", save_top_k=5),
-        EarlyStopping(monitor="val_loss", min_delta=0.,
+        EarlyStopping(monitor="v_l", min_delta=0.,
                       patience=5, verbose=False, mode="min")
     ]
     logger_dir = os.path.join(

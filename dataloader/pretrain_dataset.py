@@ -29,13 +29,14 @@ class MultimodalPretrainingDataset(data.Dataset):
         self.df = self.df[self.df["ViewPosition"].isin(["PA", "AP"])]
         self.df[MIMIC_CXR_PATH_COL] = self.df[MIMIC_CXR_PATH_COL].apply(
             lambda x: os.path.join(MIMIC_CXR_DATA_DIR, "/".join(x.split("/")[1:])))
+        
+        if data_pct != 1.0 and split == "train":
+            self.df = self.df.sample(frac=data_pct, random_state=42)
 
         # load studies and study to text mapping
         self.filenames, self.path2sent = self.load_text_data(split)
         
         self.df = self.df[self.df[MIMIC_CXR_SPLIT_COL] == split]
-        if data_pct != 1.0 and split == "train":
-            self.df = self.df.sample(frac=data_pct, random_state=42)
         self.df.reset_index(drop=True, inplace=True)
         
         # self.tokenizer = BertTokenizer.from_pretrained(
