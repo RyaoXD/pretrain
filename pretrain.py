@@ -54,7 +54,7 @@ def main():
                       patience=5, verbose=False, mode="min")
     ]
     logger_dir = os.path.join(
-        BASE_DIR, f"./data")
+        BASE_DIR, f"./data/pretrain")
     os.makedirs(logger_dir, exist_ok=True)
     wandb_logger = WandbLogger(
         project="pretrain", save_dir=logger_dir, name=extension)

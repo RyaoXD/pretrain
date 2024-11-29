@@ -9,13 +9,13 @@ from pytorch_lightning.callbacks import (EarlyStopping, LearningRateMonitor,
                                          ModelCheckpoint)
 from pytorch_lightning.loggers import WandbLogger
 
-from mgca.datasets.classification_dataset import (CheXpertImageDataset,
-                                                  COVIDXImageDataset,
-                                                  RSNAImageDataset)
-from mgca.datasets.data_module import DataModule
-from mgca.datasets.transforms import DataTransforms, Moco2Transform
-from mgca.models.mgca.mgca_module import MGCA
-from mgca.models.ssl_finetuner import SSLFineTuner
+from dataloader.data_module import DataModule
+from dataloader.classification_dataset import (CheXpertImageDataset,
+                                               COVIDXImageDataset,
+                                               RSNAImageDataset)
+from dataloader.transforms import DataTransforms, Moco2Transform
+from models.main_net import main_net
+from models.ssl_finetuner import SSLFineTuner
 
 torch.autograd.set_detect_anomaly(True)
 torch.backends.cudnn.deterministic = True
@@ -27,9 +27,9 @@ def cli_main():
     parser = ArgumentParser()
     parser.add_argument("--dataset", type=str, default="chexpert")
     parser.add_argument("--path", type=str,
-                        default="/home/kxm/code/pretrain/data/ckpts/pretrain/2024_11_24_03_13_48/epoch=23-step=75767.ckpt")
+                        default="/home/kxm/code/pretrain/checkpoints/pretrain/baseline/epoch=22-step=72610.ckpt")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--batch_size", type=int, default=48)
+    parser.add_argument("--batch_size", type=int, default=72)
     parser.add_argument("--num_workers", type=int, default=16)
     parser.add_argument("--data_pct", type=float, default=0.01)
     # add trainer args
@@ -66,9 +66,9 @@ def cli_main():
         raise RuntimeError(f"no dataset called {args.dataset}")
 
     if args.path:
-        model = MGCA.load_from_checkpoint(args.path, strict=False)
+        model = main_net.load_from_checkpoint(args.path, strict=False)
     else:
-        model = MGCA()
+        model = main_net()
 
     args.model_name = model.hparams.img_encoder
     args.backbone = model.img_encoder_q
@@ -83,7 +83,7 @@ def cli_main():
     now = datetime.datetime.now(tz.tzlocal())
     extension = now.strftime("%Y_%m_%d_%H_%M_%S")
     ckpt_dir = os.path.join(
-        BASE_DIR, f"../../../data/ckpts/mgca_finetune/{extension}")
+        BASE_DIR, f"./data/ckpts/finetuner/{extension}")
     os.makedirs(ckpt_dir, exist_ok=True)
     callbacks = [
         LearningRateMonitor(logging_interval="step"),
@@ -98,10 +98,10 @@ def cli_main():
 
     extension = now.strftime("%Y_%m_%d_%H_%M_%S")
     logger_dir = os.path.join(
-        BASE_DIR, f"../../../data/wandb")
+        BASE_DIR, f"./data/fintuner")
     os.makedirs(logger_dir, exist_ok=True)
     wandb_logger = WandbLogger(
-        project="mgca_finetune",
+        project="finetuner",
         save_dir=logger_dir,
         name=f"{args.dataset}_{args.data_pct}_{extension}")
     trainer = Trainer.from_argparse_args(

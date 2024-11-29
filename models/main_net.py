@@ -413,7 +413,7 @@ class main_net(LightningModule):
 
             loss_proto += (loss_p2w_proto + loss_w2p_proto) / 2.
         
-        return loss_global, loss_local, loss_proto, acc1, acc5, (word_attn_q.max(),word_attn_q.min())
+        return loss_global, loss_local, loss_proto, acc1, acc5
     
     def sinkhorn(self, Q, nmb_iters):
         ''' 
@@ -470,7 +470,7 @@ class main_net(LightningModule):
             return (Q / torch.sum(Q, dim=0, keepdim=True)).t().float()
 
     def training_step(self, batch, batch_idx):
-        loss_global, loss_local, loss_proto, acc1, acc5, attnminmax = self(
+        loss_global, loss_local, loss_proto, acc1, acc5 = self(
             batch, batch_idx, "train")
         loss = self.hparams.lambda_1 * loss_global + self.hparams.lambda_2 * \
             loss_local + self.hparams.lambda_3 * loss_proto
@@ -481,9 +481,7 @@ class main_net(LightningModule):
             "t_l_local": self.hparams.lambda_2 * loss_local,
             "t_l_proto": self.hparams.lambda_3 * loss_proto,
             "t_acc1": acc1,
-            "t_acc5": acc5,
-            "t_amax": attnminmax[0],
-            "t_amin": attnminmax[1]
+            "t_acc5": acc5
         }
         self.log_dict(log, batch_size=self.hparams.batch_size,
                       sync_dist=True, prog_bar=True)
@@ -500,7 +498,7 @@ class main_net(LightningModule):
                     param.grad = None
 
     def validation_step(self, batch, batch_idx):
-        loss_global, loss_local, loss_proto, acc1, acc5, attnminmax = self(
+        loss_global, loss_local, loss_proto, acc1, acc5 = self(
             batch, batch_idx, "valid")
 
         loss = self.hparams.lambda_1 * loss_global + self.hparams.lambda_2 * \
@@ -512,9 +510,7 @@ class main_net(LightningModule):
             "v_l_local": self.hparams.lambda_2 * loss_local,
             "v_l_proto": self.hparams.lambda_3 * loss_proto,
             "v_acc1": acc1,
-            "v_acc5": acc5,
-            "v_amax": attnminmax[0],
-            "v_amin": attnminmax[1]
+            "v_acc5": acc5
         }
         self.log_dict(log, batch_size=self.hparams.batch_size,
                       sync_dist=True, prog_bar=True)
@@ -575,7 +571,7 @@ class main_net(LightningModule):
         parser.add_argument("--momentum", type=float, default=0.9)
         parser.add_argument("--weight_decay", type=float, default=0.05)
         parser.add_argument("--batch_size", type=int, default=72)
-        # parser.add_argument("--batch_size", type=int, default=20)
+        # parser.add_argument("--batch_size", type=int, default=64)
         
         parser.add_argument("--sentence_split", action="store_true", default=False)
         parser.add_argument("--class_prototype", type=str,

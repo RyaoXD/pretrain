@@ -12,3 +12,9 @@
 
 # 忽略记录文件
 /data/
+
+# 忽略预训练模型存档
+/checkpoints/
+
+# 忽略循环运行文件
+/shellrun.py

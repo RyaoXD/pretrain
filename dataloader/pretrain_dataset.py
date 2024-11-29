@@ -153,12 +153,19 @@ class MultimodalPretrainingDataset(data.Dataset):
         series_sents = list(filter(lambda x: x != "", series_sents))
 
         if self.sentence_split:
+            # tokens = self.tokenizer(
+            #     series_sents,
+            #     return_tensors="pt",
+            #     truncation=True,
+            #     padding="max_length",
+            #     max_length=self.max_words,
+            # )
             tokens = self.tokenizer(
                 series_sents,
                 return_tensors="pt",
                 truncation=True,
                 padding="max_length",
-                max_length=self.max_words,
+                max_length=self.max_words//5,
             )
             x_len = [len([t for t in senttokens if t != 0]) for senttokens in tokens["input_ids"]]
         else:

@@ -10,7 +10,7 @@ DATA_BASE_DIR = Path(DATA_BASE_DIR)
 # #############################################
 # CheXpert constants
 # #############################################
-CHEXPERT_DATA_DIR = DATA_BASE_DIR / "CheXpert-v1.0"
+CHEXPERT_DATA_DIR = DATA_BASE_DIR / "/CheXpert/CheXpert-v1.0"
 CHEXPERT_ORIGINAL_TRAIN_CSV = CHEXPERT_DATA_DIR / "train.csv"
 CHEXPERT_TRAIN_CSV = CHEXPERT_DATA_DIR / \
     "train_split.csv"  # train split from train.csv
