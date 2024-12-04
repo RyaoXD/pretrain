@@ -7,9 +7,9 @@ import pydicom
 import torch
 from albumentations import Compose, Normalize, Resize, ShiftScaleRotate
 from albumentations.pytorch import ToTensorV2
-from mgca.constants import *
-from mgca.datasets.classification_dataset import BaseImageDataset
-from mgca.datasets.utils import resize_img
+from constants import *
+from dataloader.classification_dataset import BaseImageDataset
+from dataloader.utils import resize_img
 from PIL import Image
 
 np.random.seed(42)

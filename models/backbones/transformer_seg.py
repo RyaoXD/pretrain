@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss, MSELoss
 from einops import rearrange
-from mgca.models.backbones.transformer_model import TransModel2d, TransConfig
+from models.backbones.transformer_model import TransModel2d, TransConfig
 import math
 
 

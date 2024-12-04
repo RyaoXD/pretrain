@@ -10,12 +10,12 @@ from pytorch_lightning.callbacks import (EarlyStopping, LearningRateMonitor,
                                          ModelCheckpoint)
 from pytorch_lightning.loggers import WandbLogger
 
-from mgca.datasets.data_module import DataModule
-from mgca.datasets.segmentation_dataset import (RSNASegmentDataset,
+from dataloader.data_module import DataModule
+from dataloader.segmentation_dataset import (RSNASegmentDataset,
                                                 SIIMImageDataset)
-from mgca.models.backbones.transformer_seg import SETRModel
-from mgca.models.mgca.mgca_module import MGCA
-from mgca.models.ssl_segmenter import SSLSegmenter
+from models.backbones.transformer_seg import SETRModel
+from models.main_net import main_net
+from models.ssl_segmenter import SSLSegmenter
 
 torch.autograd.set_detect_anomaly(True)
 torch.backends.cudnn.deterministic = True
@@ -54,7 +54,7 @@ def cli_main():
                                 None, args.data_pct,
                                 args.batch_size, args.num_workers)
 
-    mgca = MGCA.load_from_checkpoint(args.ckpt_path)
+    mgca = main_net.load_from_checkpoint(args.ckpt_path)
     encoder = mgca.img_encoder_q.model
 
     if args.base_model == "vit":

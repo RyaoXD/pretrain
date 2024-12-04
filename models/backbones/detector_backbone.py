@@ -1,7 +1,7 @@
 import ipdb
 import torch
 import torch.nn as nn
-from mgca.models.backbones import cnn_backbones
+from models.backbones import cnn_backbones
 from torch import nn
 
 

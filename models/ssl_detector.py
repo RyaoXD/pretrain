@@ -2,12 +2,12 @@ from typing import List
 import torch
 import torch.nn as nn
 from collections import OrderedDict
-from mgca.utils.yolo_loss import YOLOLoss
-from mgca.datasets.data_module import DataModule
-from mgca.datasets.transforms import DataTransforms
-from mgca.datasets.detection_dataset import RSNADetectionDataset
+from utils.yolo_loss import YOLOLoss
+from dataloader.data_module import DataModule
+from dataloader.transforms import DataTransforms
+from dataloader.detection_dataset import RSNADetectionDataset
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
-from mgca.utils.detection_utils import non_max_suppression
+from utils.detection_utils import non_max_suppression
 from pytorch_lightning import LightningModule
 
 

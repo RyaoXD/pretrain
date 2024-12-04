@@ -3,7 +3,7 @@ import os
 import numpy as np
 import torch
 import torch.nn as nn
-from mgca.utils.segmentation_loss import MixedLoss
+from utils.segmentation_loss import MixedLoss
 from pytorch_lightning import LightningModule
 
 torch.autograd.set_detect_anomaly(True)

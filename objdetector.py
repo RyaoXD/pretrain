@@ -9,12 +9,12 @@ from pytorch_lightning.callbacks import (EarlyStopping, LearningRateMonitor,
                                          ModelCheckpoint)
 from pytorch_lightning.loggers import WandbLogger
 
-from mgca.datasets.data_module import DataModule
-from mgca.datasets.detection_dataset import (OBJCXRDetectionDataset,
+from dataloader.data_module import DataModule
+from dataloader.detection_dataset import (OBJCXRDetectionDataset,
                                              RSNADetectionDataset)
-from mgca.datasets.transforms import DetectionDataTransforms
-from mgca.models.backbones.detector_backbone import ResNetDetector
-from mgca.models.ssl_detector import SSLDetector
+from dataloader.transforms import DetectionDataTransforms
+from models.backbones.detector_backbone import ResNetDetector
+from models.ssl_detector import SSLDetector
 
 torch.autograd.set_detect_anomaly(True)
 torch.backends.cudnn.deterministic = True

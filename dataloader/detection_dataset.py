@@ -3,10 +3,10 @@ import random
 
 import cv2
 import numpy as np
-from mgca.constants import *
-from mgca.datasets.classification_dataset import BaseImageDataset
-from mgca.datasets.transforms import *
-from mgca.datasets.utils import read_from_dicom
+from constants import *
+from dataloader.classification_dataset import BaseImageDataset
+from dataloader.transforms import *
+from dataloader.utils import read_from_dicom
 from PIL import Image
 
 random.seed(42)

@@ -68,14 +68,21 @@ class main_net(LightningModule):
 
         if self.hparams.symptom_prototype is None:
             self.symptom_prototype_layer = None
+            # self.symptom_prototype_vectors = None
         else:
             self.symptom_prototype_layer = nn.Linear(emb_dim, num_prototypes, bias=False)
+            # self.symptom_prototype_vectors = nn.Parameter(torch.rand(emb_dim, num_prototypes),
+            #                                               requires_grad=True)
         
         if self.hparams.class_prototype == "mapping":
             assert not self.symptom_prototype_layer is None, "No symptom_prototype_layer"
             self.class_prototype_layer = nn.Linear(num_prototypes, num_prototypes, bias=False)
+            # self.class_prototype_vectors = nn.Parameter(torch.rand(num_prototypes, num_prototypes),
+            #                                               requires_grad=True)
         else:
             self.class_prototype_layer = nn.Linear(emb_dim, num_prototypes, bias=False)
+            # self.class_prototype_vectors = nn.Parameter(torch.rand(emb_dim, num_prototypes),
+            #                                               requires_grad=True)
         
         self.class_proinit_pool = None
         self.symptom_proinit_pool = None
@@ -412,7 +419,31 @@ class main_net(LightningModule):
                     torch.sum(word_code * torch.log(patch_proto_prob), dim=1))
 
             loss_proto += (loss_p2w_proto + loss_w2p_proto) / 2.
-        
+
+        ### Compute prototype orth loss
+        if self.hparams.prototype_orth:
+            loss_orth = 0
+            if not self.class_prototype_layer is None:
+                prototype_vector = torch.squeeze(self.class_prototype_layer.weight.data.clone())
+                prototype_vector_T = torch.transpose(prototype_vector,0,1)
+                orth_operator = torch.matmul(prototype_vector,prototype_vector_T)
+                I_operator = torch.eye(prototype_vector.size(0),prototype_vector.size(0)).cuda()
+                difference_value = orth_operator - I_operator
+                # loss_orth = (torch.norm(difference_value,p=1) - 0)/difference_value.size(0)
+                loss_corth = (torch.norm(difference_value,p=1) ** 0.5)/difference_value.size(0)
+                loss_orth += loss_corth
+                # loss_orth = 100*torch.mean(torch.relu(torch.norm(difference_value,p=1) - 0))
+            if not self.symptom_prototype_layer is None:
+                prototype_vector = torch.squeeze(self.symptom_prototype_layer.weight.data.clone())
+                prototype_vector_T = torch.transpose(prototype_vector,0,1)
+                orth_operator = torch.matmul(prototype_vector,prototype_vector_T)
+                I_operator = torch.eye(prototype_vector.size(0),prototype_vector.size(0)).cuda()
+                difference_value = orth_operator - I_operator
+                # loss_orth = (torch.norm(difference_value,p=1) - 0)/difference_value.size(0)
+                loss_sorth = (torch.norm(difference_value,p=1) ** 0.5)/difference_value.size(0)
+                loss_orth += loss_sorth
+            loss_proto += self.hparams.lambda_orth * loss_orth
+            
         return loss_global, loss_local, loss_proto, acc1, acc5
     
     def sinkhorn(self, Q, nmb_iters):
@@ -571,15 +602,17 @@ class main_net(LightningModule):
         parser.add_argument("--momentum", type=float, default=0.9)
         parser.add_argument("--weight_decay", type=float, default=0.05)
         parser.add_argument("--batch_size", type=int, default=72)
-        # parser.add_argument("--batch_size", type=int, default=64)
+        # parser.add_argument("--batch_size", type=int, default=20)
         
         parser.add_argument("--sentence_split", action="store_true", default=False)
         parser.add_argument("--class_prototype", type=str,
                             default="mapping", help="random, group, mapping")
         parser.add_argument("--symptom_prototype", type=str or None,
-                            default="group", help="random, group")
+                            default="random", help="random, group")
         parser.add_argument("--num_prototypes", type=int or None, default=500)
         parser.add_argument("--num_center", type=int, default=200)
+        parser.add_argument("--prototype_orth", action="store_true", default=False)
+        parser.add_argument("--lambda_orth", type=float, default=1.)
         
         parser.add_argument("--num_heads", type=int, default=1)
         parser.add_argument("--experiment_name", type=str, default="")
