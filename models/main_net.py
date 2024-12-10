@@ -68,21 +68,21 @@ class main_net(LightningModule):
 
         if self.hparams.symptom_prototype is None:
             self.symptom_prototype_layer = None
-            # self.symptom_prototype_vectors = None
+            self.symptom_prototype_vectors = None
         else:
             self.symptom_prototype_layer = nn.Linear(emb_dim, num_prototypes, bias=False)
-            # self.symptom_prototype_vectors = nn.Parameter(torch.rand(emb_dim, num_prototypes),
-            #                                               requires_grad=True)
+            self.symptom_prototype_vectors = nn.Parameter(torch.rand(emb_dim, num_prototypes),
+                                                          requires_grad=True)
         
         if self.hparams.class_prototype == "mapping":
             assert not self.symptom_prototype_layer is None, "No symptom_prototype_layer"
             self.class_prototype_layer = nn.Linear(num_prototypes, num_prototypes, bias=False)
-            # self.class_prototype_vectors = nn.Parameter(torch.rand(num_prototypes, num_prototypes),
-            #                                               requires_grad=True)
+            self.class_prototype_vectors = nn.Parameter(torch.rand(num_prototypes, num_prototypes),
+                                                          requires_grad=True)
         else:
             self.class_prototype_layer = nn.Linear(emb_dim, num_prototypes, bias=False)
-            # self.class_prototype_vectors = nn.Parameter(torch.rand(emb_dim, num_prototypes),
-            #                                               requires_grad=True)
+            self.class_prototype_vectors = nn.Parameter(torch.rand(emb_dim, num_prototypes),
+                                                          requires_grad=True)
         
         self.class_proinit_pool = None
         self.symptom_proinit_pool = None
@@ -422,26 +422,23 @@ class main_net(LightningModule):
 
         ### Compute prototype orth loss
         if self.hparams.prototype_orth:
-            loss_orth = 0
-            if not self.class_prototype_layer is None:
-                prototype_vector = torch.squeeze(self.class_prototype_layer.weight.data.clone())
-                prototype_vector_T = torch.transpose(prototype_vector,0,1)
-                orth_operator = torch.matmul(prototype_vector,prototype_vector_T)
-                I_operator = torch.eye(prototype_vector.size(0),prototype_vector.size(0)).cuda()
-                difference_value = orth_operator - I_operator
-                # loss_orth = (torch.norm(difference_value,p=1) - 0)/difference_value.size(0)
-                loss_corth = (torch.norm(difference_value,p=1) ** 0.5)/difference_value.size(0)
-                loss_orth += loss_corth
-                # loss_orth = 100*torch.mean(torch.relu(torch.norm(difference_value,p=1) - 0))
+            # if not self.class_prototype_layer is None:
+            #     prototype_vector = torch.squeeze(self.class_prototype_layer.weight)
+            #     prototype_vector_T = torch.transpose(prototype_vector,0,1)
+            #     orth_operator = torch.matmul(prototype_vector,prototype_vector_T)
+            #     I_operator = torch.eye(prototype_vector.size(0),prototype_vector.size(0)).to(orth_operator.device)
+            #     difference_value = orth_operator - I_operator
+            #     loss_corth = (torch.norm(difference_value,p=1) ** 0.5)/difference_value.size(0)
+            #     loss_orth += loss_corth
+            #     # loss_orth = 100*torch.mean(torch.relu(torch.norm(difference_value,p=1) - 0))
             if not self.symptom_prototype_layer is None:
-                prototype_vector = torch.squeeze(self.symptom_prototype_layer.weight.data.clone())
+                prototype_vector = torch.squeeze(self.symptom_prototype_layer.weight)
                 prototype_vector_T = torch.transpose(prototype_vector,0,1)
                 orth_operator = torch.matmul(prototype_vector,prototype_vector_T)
-                I_operator = torch.eye(prototype_vector.size(0),prototype_vector.size(0)).cuda()
+                I_operator = torch.eye(prototype_vector.size(0),prototype_vector.size(0)).to(orth_operator.device)
                 difference_value = orth_operator - I_operator
-                # loss_orth = (torch.norm(difference_value,p=1) - 0)/difference_value.size(0)
                 loss_sorth = (torch.norm(difference_value,p=1) ** 0.5)/difference_value.size(0)
-                loss_orth += loss_sorth
+                loss_orth = loss_sorth
             loss_proto += self.hparams.lambda_orth * loss_orth
             
         return loss_global, loss_local, loss_proto, acc1, acc5
